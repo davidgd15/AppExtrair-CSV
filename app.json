@@ -1,7 +1,7 @@
 {
   "expo": {
     "name": "App Extrair",
-    "slug": "App-Extrair",
+    "slug": "appextrair",
     "version": "1.0.0",
     "orientation": "portrait",
     "icon": "./assets/icone.png",
@@ -26,7 +26,7 @@
     },
     "extra": {
       "eas": {
-        "projectId": "07cb58d7-88c0-44fa-b70d-00567205428a"
+        "projectId": "5d7d39ad-5d5f-4c40-9dd2-c8b1c73e41e5"
       }
     }
   }
