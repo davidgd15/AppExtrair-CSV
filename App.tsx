@@ -8,12 +8,29 @@ import {
   View,
   ActivityIndicator,
 } from 'react-native';
+import { Picker } from '@react-native-picker/picker';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { db } from './firebaseConfig';
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
 
-// ---------- Tipagens ----------
+// ==================== CONSTANTES ====================
+const USINAS = ['GD-1', 'GD-2', 'GD-3', 'GD-4', 'PARAOPEBA-1', 'PARAOPEBA-2'];
+const SUBAREAS: Record<string, string[]> = {
+  'GD-1': ['UFV 1', 'UFV 2', 'UFV 3'],
+  'GD-2': ['UFV 1', 'UFV 2', 'UFV 3'],
+  'GD-3': ['UFV 1', 'UFV 2', 'UFV 3'],
+  'GD-4': ['UFV 1', 'UFV 2', 'UFV 3'],
+  'PARAOPEBA-1': ['A', 'B', 'C'],
+  'PARAOPEBA-2': ['A', 'B', 'C'],
+};
+
+// Gera a lista de nomes de coleção (ex.: GD-1-UFV-1)
+const COLLECTIONS = USINAS.flatMap((usina) =>
+  SUBAREAS[usina].map((sub) => `${usina}-${sub.replace(/ /g, '-')}`)
+);
+
+// ==================== TIPAGENS ====================
 type Module = {
   id: number;
   code: string;
@@ -23,12 +40,15 @@ type Module = {
 type Batch = {
   id?: string;
   batchId: string;
+  usina: string;
+  subarea: string;
   modules: Module[];
   createdAt: string;
   synced?: boolean;
+  maxModules: number;
 };
 
-// ---------- Função de formatação ----------
+// ==================== FORMATADOR DE DATA ====================
 const formatDateTime = (date: Date): string => {
   const formatter = new Intl.DateTimeFormat('pt-BR', {
     timeZone: 'America/Sao_Paulo',
@@ -43,16 +63,23 @@ const formatDateTime = (date: Date): string => {
   return formatter.format(date);
 };
 
-// ---------- App Supervisor ----------
+// ==================== APP SUPERVISOR ====================
 export default function App() {
   const [batches, setBatches] = useState<Batch[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [selectedCollection, setSelectedCollection] = useState(COLLECTIONS[0]);
+  const [exportMode, setExportMode] = useState<'simples' | 'completo'>('simples');
 
+  // Buscar lotes da coleção selecionada
   const fetchBatches = useCallback(async () => {
+    setLoading(true);
     try {
-      const q = query(collection(db, 'batches'), orderBy('createdAt', 'desc'));
+      const q = query(
+        collection(db, selectedCollection),
+        orderBy('createdAt', 'desc')
+      );
       const snapshot = await getDocs(q);
 
       const loaded: Batch[] = snapshot.docs.map((doc) => {
@@ -60,9 +87,12 @@ export default function App() {
         return {
           id: doc.id,
           batchId: data.batchId ?? 'Sem ID',
+          usina: data.usina ?? '',
+          subarea: data.subarea ?? '',
           modules: Array.isArray(data.modules) ? data.modules : [],
           createdAt: data.createdAt ?? '',
-          synced: true,
+          synced: data.synced ?? true,
+          maxModules: data.maxModules ?? 30,
         };
       });
 
@@ -74,32 +104,48 @@ export default function App() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, []);
+  }, [selectedCollection]);
 
-  // Carregar na montagem inicial
+  // Carrega ao montar e ao trocar de coleção
   useEffect(() => {
     fetchBatches();
   }, [fetchBatches]);
 
-  // Função de exportação CSV (com separador ; e BOM)
+  // ==================== EXPORTAÇÃO ====================
   const exportData = async () => {
     if (exporting) return;
     setExporting(true);
     try {
-      // BOM + cabeçalho com ;
-      let csvContent = '\uFEFF' + 'Lote;ID Modulo;Número de Série\n';
+      let csvContent = '';
 
-      batches.forEach((batch) => {
-        batch.modules.forEach((mod) => {
-          // Escapa aspas duplas dentro do código
-          const escapedCode = `"${mod.code.replace(/"/g, '""')}"`;
-          csvContent += `${batch.batchId};${mod.id};${escapedCode}\n`;
+      if (exportMode === 'simples') {
+        csvContent = '\uFEFF' + 'Lote;ID Modulo;Número de Série\n';
+        batches.forEach((batch) => {
+          batch.modules.forEach((mod) => {
+            const escapedCode = `"${mod.code.replace(/"/g, '""')}"`;
+            csvContent += `${batch.batchId};${mod.id};${escapedCode}\n`;
+          });
         });
-        // Se quiser incluir lotes vazios, descomente a linha abaixo:
-        // if (batch.modules.length === 0) { csvContent += `${batch.batchId};;\n`; }
-      });
+      } else {
+        // Modo completo: todas as informações
+        csvContent =
+          '\uFEFF' +
+          'Usina;Subarea;Lote;ID Modulo;Número de Série;Data/Hora Modulo;Data Criação Lote;Limite Módulos;Sincronizado\n';
+        batches.forEach((batch) => {
+          batch.modules.forEach((mod) => {
+            const escapedUsina = `"${batch.usina.replace(/"/g, '""')}"`;
+            const escapedSub = `"${batch.subarea.replace(/"/g, '""')}"`;
+            const escapedCode = `"${mod.code.replace(/"/g, '""')}"`;
+            const escapedTimestamp = `"${mod.timestamp.replace(/"/g, '""')}"`;
+            const escapedCreatedAt = `"${batch.createdAt.replace(/"/g, '""')}"`;
+            csvContent += `${escapedUsina};${escapedSub};${batch.batchId};${mod.id};${escapedCode};${escapedTimestamp};${escapedCreatedAt};${batch.maxModules};${batch.synced ? 'Sim' : 'Não'}\n`;
+          });
+        });
+      }
 
-      const fileName = `lotes_${formatDateTime(new Date()).replace(/[/: ]/g, '_')}.csv`;
+      const sanitizedCollection = selectedCollection.replace(/[/\\:*?"<>|]/g, '_');
+      const modeLabel = exportMode === 'simples' ? 'simples' : 'completo';
+      const fileName = `lotes_${sanitizedCollection}_${modeLabel}_${formatDateTime(new Date()).replace(/[/: ]/g, '_')}.csv`;
       const filePath = FileSystem.documentDirectory + fileName;
 
       await FileSystem.writeAsStringAsync(filePath, csvContent, {
@@ -110,7 +156,7 @@ export default function App() {
       if (isAvailable) {
         await Sharing.shareAsync(filePath, {
           mimeType: 'text/csv',
-          dialogTitle: 'Exportar lotes (CSV)',
+          dialogTitle: `Exportar ${exportMode === 'simples' ? 'simples' : 'completo'} (CSV)`,
         });
       } else {
         Alert.alert('Exportado', `Arquivo salvo em: ${filePath}`);
@@ -123,8 +169,8 @@ export default function App() {
     }
   };
 
-  // Tela de carregamento inicial
-  if (loading) {
+  // ==================== INTERFACE ====================
+  if (loading && batches.length === 0) {
     return (
       <View style={styles.centered}>
         <ActivityIndicator size="large" color="#1976d2" />
@@ -133,12 +179,38 @@ export default function App() {
     );
   }
 
-  // Interface principal
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Modo Supervisor</Text>
+
+      {/* Seletor de coleção */}
+      <Text style={styles.label}>Tabela (coleção):</Text>
+      <View style={styles.pickerContainer}>
+        <Picker
+          selectedValue={selectedCollection}
+          onValueChange={(value) => setSelectedCollection(value)}
+        >
+          {COLLECTIONS.map((col) => (
+            <Picker.Item key={col} label={col} value={col} />
+          ))}
+        </Picker>
+      </View>
+
+      {/* Seletor de modo de exportação */}
+      <Text style={styles.label}>Modo de exportação:</Text>
+      <View style={styles.pickerContainer}>
+        <Picker
+          selectedValue={exportMode}
+          onValueChange={(value: 'simples' | 'completo') => setExportMode(value)}
+        >
+          <Picker.Item label="Simples (Lote, ID, Série)" value="simples" />
+          <Picker.Item label="Completo (todas as colunas)" value="completo" />
+        </Picker>
+      </View>
+
+      {/* Resumo */}
       <Text style={styles.subtitle}>
-        {batches.length} lote(s) encontrado(s)
+        {batches.length} lote(s) na coleção {selectedCollection}
       </Text>
 
       {/* Botões de ação */}
@@ -152,7 +224,7 @@ export default function App() {
           disabled={refreshing}
         />
         <Button
-          title={exporting ? 'Exportando...' : 'Exportar lotes (CSV)'}
+          title={exporting ? 'Exportando...' : `Exportar (${exportMode === 'simples' ? 'Simples' : 'Completo'})`}
           onPress={exportData}
           disabled={exporting}
         />
@@ -165,26 +237,36 @@ export default function App() {
         style={styles.list}
         renderItem={({ item }) => (
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Lote {item.batchId}</Text>
+            <Text style={styles.cardTitle}>
+              Lote {item.batchId} ({item.usina} - {item.subarea})
+            </Text>
             <Text style={styles.cardSubtitle}>
               {item.modules.length} módulo(s) • {item.createdAt}
             </Text>
           </View>
         )}
         ListEmptyComponent={
-          <Text style={styles.emptyText}>Nenhum lote disponível.</Text>
+          <Text style={styles.emptyText}>Nenhum lote encontrado nesta coleção.</Text>
         }
       />
     </View>
   );
 }
 
-// ---------- Estilos ----------
+// ==================== ESTILOS ====================
 const styles = StyleSheet.create({
   container: { flex: 1, padding: 20, backgroundColor: '#f5f5f5' },
   centered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
   title: { fontSize: 24, fontWeight: 'bold', textAlign: 'center', marginBottom: 8 },
   subtitle: { fontSize: 16, textAlign: 'center', marginBottom: 20, color: '#555' },
+  label: { fontSize: 16, fontWeight: 'bold', marginTop: 8, marginBottom: 4 },
+  pickerContainer: {
+    borderWidth: 1,
+    borderColor: '#ccc',
+    borderRadius: 8,
+    backgroundColor: '#fff',
+    marginBottom: 12,
+  },
   actionRow: {
     flexDirection: 'row',
     justifyContent: 'center',
