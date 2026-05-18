@@ -13,6 +13,7 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import { db } from './firebaseConfig';
 import { collection, getDocs, query, orderBy } from 'firebase/firestore';
+import { getAuth, signInAnonymously } from 'firebase/auth';
 
 // ==================== CONSTANTES ====================
 const USINAS = ['GD-1', 'GD-2', 'GD-3', 'GD-4', 'PARAOPEBA-1', 'PARAOPEBA-2'];
@@ -25,7 +26,6 @@ const SUBAREAS: Record<string, string[]> = {
   'PARAOPEBA-2': ['A', 'B', 'C'],
 };
 
-// Gera a lista de nomes de coleção (ex.: GD-1-UFV-1)
 const COLLECTIONS = USINAS.flatMap((usina) =>
   SUBAREAS[usina].map((sub) => `${usina}-${sub.replace(/ /g, '-')}`)
 );
@@ -71,6 +71,22 @@ export default function App() {
   const [exporting, setExporting] = useState(false);
   const [selectedCollection, setSelectedCollection] = useState(COLLECTIONS[0]);
   const [exportMode, setExportMode] = useState<'simples' | 'completo'>('simples');
+  const [authReady, setAuthReady] = useState(false);
+
+  // Autenticação anônima
+  useEffect(() => {
+    const auth = getAuth();
+    signInAnonymously(auth)
+      .then(() => {
+        console.log('App Extrair: autenticado.');
+        setAuthReady(true);
+      })
+      .catch((error) => {
+        console.error('Erro na autenticação:', error);
+        Alert.alert('Erro', 'Falha na conexão com o servidor.');
+        setLoading(false);
+      });
+  }, []);
 
   // Buscar lotes da coleção selecionada
   const fetchBatches = useCallback(async () => {
@@ -106,10 +122,12 @@ export default function App() {
     }
   }, [selectedCollection]);
 
-  // Carrega ao montar e ao trocar de coleção
+  // Carrega apenas quando autenticação estiver pronta
   useEffect(() => {
-    fetchBatches();
-  }, [fetchBatches]);
+    if (authReady) {
+      fetchBatches();
+    }
+  }, [fetchBatches, authReady]);
 
   // ==================== EXPORTAÇÃO ====================
   const exportData = async () => {
@@ -127,7 +145,6 @@ export default function App() {
           });
         });
       } else {
-        // Modo completo: todas as informações
         csvContent =
           '\uFEFF' +
           'Usina;Subarea;Lote;ID Modulo;Número de Série;Data/Hora Modulo;Data Criação Lote;Limite Módulos;Sincronizado\n';
@@ -170,6 +187,15 @@ export default function App() {
   };
 
   // ==================== INTERFACE ====================
+  if (!authReady && loading) {
+    return (
+      <View style={styles.centered}>
+        <ActivityIndicator size="large" color="#1976d2" />
+        <Text>Conectando ao servidor...</Text>
+      </View>
+    );
+  }
+
   if (loading && batches.length === 0) {
     return (
       <View style={styles.centered}>
@@ -183,7 +209,6 @@ export default function App() {
     <View style={styles.container}>
       <Text style={styles.title}>Modo Supervisor</Text>
 
-      {/* Seletor de coleção */}
       <Text style={styles.label}>Tabela (coleção):</Text>
       <View style={styles.pickerContainer}>
         <Picker
@@ -196,7 +221,6 @@ export default function App() {
         </Picker>
       </View>
 
-      {/* Seletor de modo de exportação */}
       <Text style={styles.label}>Modo de exportação:</Text>
       <View style={styles.pickerContainer}>
         <Picker
@@ -208,12 +232,10 @@ export default function App() {
         </Picker>
       </View>
 
-      {/* Resumo */}
       <Text style={styles.subtitle}>
         {batches.length} lote(s) na coleção {selectedCollection}
       </Text>
 
-      {/* Botões de ação */}
       <View style={styles.actionRow}>
         <Button
           title={refreshing ? 'Atualizando...' : 'Atualizar lista'}
@@ -230,7 +252,6 @@ export default function App() {
         />
       </View>
 
-      {/* Lista de lotes */}
       <FlatList
         data={batches}
         keyExtractor={(item, index) => item.id ?? index.toString()}
