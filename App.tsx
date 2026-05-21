@@ -26,9 +26,13 @@ const SUBAREAS: Record<string, string[]> = {
   'PARAOPEBA-2': ['A', 'B', 'C'],
 };
 
-const COLLECTIONS = USINAS.flatMap((usina) =>
-  SUBAREAS[usina].map((sub) => `${usina}-${sub.replace(/ /g, '-')}`)
-);
+// Coleções de lotes (já existentes) + a nova de módulos danificados
+const COLLECTIONS = [
+  ...USINAS.flatMap((usina) =>
+    SUBAREAS[usina].map((sub) => `${usina}-${sub.replace(/ /g, '-')}`)
+  ),
+  'ModulosDanificados', // <-- adicionada
+];
 
 // ==================== TIPAGENS ====================
 type Module = {
@@ -46,6 +50,14 @@ type Batch = {
   createdAt: string;
   synced?: boolean;
   maxModules: number;
+};
+
+type DamagedModule = {
+  id: string;
+  code: string;
+  usina: string;
+  subarea: string;
+  timestamp: string;
 };
 
 // ==================== FORMATADOR DE DATA ====================
@@ -66,6 +78,7 @@ const formatDateTime = (date: Date): string => {
 // ==================== APP SUPERVISOR ====================
 export default function App() {
   const [batches, setBatches] = useState<Batch[]>([]);
+  const [damagedModules, setDamagedModules] = useState<DamagedModule[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [exporting, setExporting] = useState(false);
@@ -88,33 +101,55 @@ export default function App() {
       });
   }, []);
 
-  // Buscar lotes da coleção selecionada
-  const fetchBatches = useCallback(async () => {
+  // Buscar dados da coleção selecionada
+  const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const q = query(
-        collection(db, selectedCollection),
-        orderBy('createdAt', 'desc')
-      );
-      const snapshot = await getDocs(q);
-
-      const loaded: Batch[] = snapshot.docs.map((doc) => {
-        const data = doc.data();
-        return {
-          id: doc.id,
-          batchId: data.batchId ?? 'Sem ID',
-          usina: data.usina ?? '',
-          subarea: data.subarea ?? '',
-          modules: Array.isArray(data.modules) ? data.modules : [],
-          createdAt: data.createdAt ?? '',
-          synced: data.synced ?? true,
-          maxModules: data.maxModules ?? 30,
-        };
-      });
-
-      setBatches(loaded);
+      if (selectedCollection === 'ModulosDanificados') {
+        // Busca módulos danificados
+        const q = query(
+          collection(db, 'ModulosDanificados'),
+          orderBy('timestamp', 'desc')
+        );
+        const snapshot = await getDocs(q);
+        const loaded: DamagedModule[] = [];
+        snapshot.forEach((doc) => {
+          const data = doc.data();
+          loaded.push({
+            id: doc.id,
+            code: data.code ?? '',
+            usina: data.usina ?? '',
+            subarea: data.subarea ?? '',
+            timestamp: data.timestamp ?? '',
+          });
+        });
+        setDamagedModules(loaded);
+        setBatches([]); // limpa lotes
+      } else {
+        // Busca lotes (código original)
+        const q = query(
+          collection(db, selectedCollection),
+          orderBy('createdAt', 'desc')
+        );
+        const snapshot = await getDocs(q);
+        const loaded: Batch[] = snapshot.docs.map((doc) => {
+          const data = doc.data();
+          return {
+            id: doc.id,
+            batchId: data.batchId ?? 'Sem ID',
+            usina: data.usina ?? '',
+            subarea: data.subarea ?? '',
+            modules: Array.isArray(data.modules) ? data.modules : [],
+            createdAt: data.createdAt ?? '',
+            synced: data.synced ?? true,
+            maxModules: data.maxModules ?? 30,
+          };
+        });
+        setBatches(loaded);
+        setDamagedModules([]);
+      }
     } catch (error) {
-      Alert.alert('Erro', 'Falha ao carregar os lotes do servidor.');
+      Alert.alert('Erro', 'Falha ao carregar os dados.');
       console.error(error);
     } finally {
       setLoading(false);
@@ -122,12 +157,12 @@ export default function App() {
     }
   }, [selectedCollection]);
 
-  // Carrega apenas quando autenticação estiver pronta
+  // Carrega quando auth pronto e ao trocar coleção
   useEffect(() => {
     if (authReady) {
-      fetchBatches();
+      fetchData();
     }
-  }, [fetchBatches, authReady]);
+  }, [authReady, fetchData]);
 
   // ==================== EXPORTAÇÃO ====================
   const exportData = async () => {
@@ -136,33 +171,45 @@ export default function App() {
     try {
       let csvContent = '';
 
-      if (exportMode === 'simples') {
-        csvContent = '\uFEFF' + 'Lote;ID Modulo;Número de Série\n';
-        batches.forEach((batch) => {
-          batch.modules.forEach((mod) => {
-            const escapedCode = `"${mod.code.replace(/"/g, '""')}"`;
-            csvContent += `${batch.batchId};${mod.id};${escapedCode}\n`;
-          });
+      if (selectedCollection === 'ModulosDanificados') {
+        // Exportação específica para módulos danificados
+        csvContent = '\uFEFF' + 'Usina;Subarea;Código;Data/Hora\n';
+        damagedModules.forEach((mod) => {
+          const escapedUsina = `"${mod.usina.replace(/"/g, '""')}"`;
+          const escapedSub = `"${mod.subarea.replace(/"/g, '""')}"`;
+          const escapedCode = `"${mod.code.replace(/"/g, '""')}"`;
+          const escapedTimestamp = `"${mod.timestamp.replace(/"/g, '""')}"`;
+          csvContent += `${escapedUsina};${escapedSub};${escapedCode};${escapedTimestamp}\n`;
         });
       } else {
-        csvContent =
-          '\uFEFF' +
-          'Usina;Subarea;Lote;ID Modulo;Número de Série;Data/Hora Modulo;Data Criação Lote;Limite Módulos;Sincronizado\n';
-        batches.forEach((batch) => {
-          batch.modules.forEach((mod) => {
-            const escapedUsina = `"${batch.usina.replace(/"/g, '""')}"`;
-            const escapedSub = `"${batch.subarea.replace(/"/g, '""')}"`;
-            const escapedCode = `"${mod.code.replace(/"/g, '""')}"`;
-            const escapedTimestamp = `"${mod.timestamp.replace(/"/g, '""')}"`;
-            const escapedCreatedAt = `"${batch.createdAt.replace(/"/g, '""')}"`;
-            csvContent += `${escapedUsina};${escapedSub};${batch.batchId};${mod.id};${escapedCode};${escapedTimestamp};${escapedCreatedAt};${batch.maxModules};${batch.synced ? 'Sim' : 'Não'}\n`;
+        // Lógica original para lotes
+        if (exportMode === 'simples') {
+          csvContent = '\uFEFF' + 'Lote;ID Modulo;Número de Série\n';
+          batches.forEach((batch) => {
+            batch.modules.forEach((mod) => {
+              const escapedCode = `"${mod.code.replace(/"/g, '""')}"`;
+              csvContent += `${batch.batchId};${mod.id};${escapedCode}\n`;
+            });
           });
-        });
+        } else {
+          csvContent =
+            '\uFEFF' +
+            'Usina;Subarea;Lote;ID Modulo;Número de Série;Data/Hora Modulo;Data Criação Lote;Limite Módulos;Sincronizado\n';
+          batches.forEach((batch) => {
+            batch.modules.forEach((mod) => {
+              const escapedUsina = `"${batch.usina.replace(/"/g, '""')}"`;
+              const escapedSub = `"${batch.subarea.replace(/"/g, '""')}"`;
+              const escapedCode = `"${mod.code.replace(/"/g, '""')}"`;
+              const escapedTimestamp = `"${mod.timestamp.replace(/"/g, '""')}"`;
+              const escapedCreatedAt = `"${batch.createdAt.replace(/"/g, '""')}"`;
+              csvContent += `${escapedUsina};${escapedSub};${batch.batchId};${mod.id};${escapedCode};${escapedTimestamp};${escapedCreatedAt};${batch.maxModules};${batch.synced ? 'Sim' : 'Não'}\n`;
+            });
+          });
+        }
       }
 
       const sanitizedCollection = selectedCollection.replace(/[/\\:*?"<>|]/g, '_');
-      const modeLabel = exportMode === 'simples' ? 'simples' : 'completo';
-      const fileName = `lotes_${sanitizedCollection}_${modeLabel}_${formatDateTime(new Date()).replace(/[/: ]/g, '_')}.csv`;
+      const fileName = `dados_${sanitizedCollection}_${formatDateTime(new Date()).replace(/[/: ]/g, '_')}.csv`;
       const filePath = FileSystem.documentDirectory + fileName;
 
       await FileSystem.writeAsStringAsync(filePath, csvContent, {
@@ -173,7 +220,7 @@ export default function App() {
       if (isAvailable) {
         await Sharing.shareAsync(filePath, {
           mimeType: 'text/csv',
-          dialogTitle: `Exportar ${exportMode === 'simples' ? 'simples' : 'completo'} (CSV)`,
+          dialogTitle: 'Exportar dados (CSV)',
         });
       } else {
         Alert.alert('Exportado', `Arquivo salvo em: ${filePath}`);
@@ -196,19 +243,14 @@ export default function App() {
     );
   }
 
-  if (loading && batches.length === 0) {
-    return (
-      <View style={styles.centered}>
-        <ActivityIndicator size="large" color="#1976d2" />
-        <Text>Carregando lotes...</Text>
-      </View>
-    );
-  }
+  const isDamaged = selectedCollection === 'ModulosDanificados';
+  const currentData = isDamaged ? damagedModules : batches;
 
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Modo Supervisor</Text>
 
+      {/* Seletor de coleção */}
       <Text style={styles.label}>Tabela (coleção):</Text>
       <View style={styles.pickerContainer}>
         <Picker
@@ -221,55 +263,84 @@ export default function App() {
         </Picker>
       </View>
 
-      <Text style={styles.label}>Modo de exportação:</Text>
-      <View style={styles.pickerContainer}>
-        <Picker
-          selectedValue={exportMode}
-          onValueChange={(value: 'simples' | 'completo') => setExportMode(value)}
-        >
-          <Picker.Item label="Simples (Lote, ID, Série)" value="simples" />
-          <Picker.Item label="Completo (todas as colunas)" value="completo" />
-        </Picker>
-      </View>
+      {/* Seletor de modo de exportação (apenas para lotes) */}
+      {!isDamaged && (
+        <>
+          <Text style={styles.label}>Modo de exportação:</Text>
+          <View style={styles.pickerContainer}>
+            <Picker
+              selectedValue={exportMode}
+              onValueChange={(value: 'simples' | 'completo') => setExportMode(value)}
+            >
+              <Picker.Item label="Simples (Lote, ID, Série)" value="simples" />
+              <Picker.Item label="Completo (todas as colunas)" value="completo" />
+            </Picker>
+          </View>
+        </>
+      )}
 
+      {/* Resumo */}
       <Text style={styles.subtitle}>
-        {batches.length} lote(s) na coleção {selectedCollection}
+        {isDamaged
+          ? `${damagedModules.length} módulo(s) danificado(s)`
+          : `${batches.length} lote(s) na coleção ${selectedCollection}`}
       </Text>
 
+      {/* Botões de ação */}
       <View style={styles.actionRow}>
         <Button
           title={refreshing ? 'Atualizando...' : 'Atualizar lista'}
           onPress={() => {
             setRefreshing(true);
-            fetchBatches();
+            fetchData();
           }}
           disabled={refreshing}
         />
         <Button
-          title={exporting ? 'Exportando...' : `Exportar (${exportMode === 'simples' ? 'Simples' : 'Completo'})`}
+          title={exporting ? 'Exportando...' : 'Exportar CSV'}
           onPress={exportData}
           disabled={exporting}
         />
       </View>
 
-      <FlatList
-        data={batches}
-        keyExtractor={(item, index) => item.id ?? index.toString()}
-        style={styles.list}
-        renderItem={({ item }) => (
-          <View style={styles.card}>
-            <Text style={styles.cardTitle}>
-              Lote {item.batchId} ({item.usina} - {item.subarea})
-            </Text>
-            <Text style={styles.cardSubtitle}>
-              {item.modules.length} módulo(s) • {item.createdAt}
-            </Text>
-          </View>
-        )}
-        ListEmptyComponent={
-          <Text style={styles.emptyText}>Nenhum lote encontrado nesta coleção.</Text>
-        }
-      />
+      {/* Lista de itens */}
+      {loading && currentData.length === 0 ? (
+        <ActivityIndicator size="large" color="#1976d2" style={{ marginTop: 20 }} />
+      ) : (
+        <FlatList
+  data={currentData as any[]}
+  keyExtractor={(item: any, index: number) => item.id ?? index.toString()}
+  style={styles.list}
+  renderItem={({ item }) => {
+    if ('batchId' in item) {
+      const batch = item as Batch;
+      return (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>
+            Lote {batch.batchId} ({batch.usina} - {batch.subarea})
+          </Text>
+          <Text style={styles.cardSubtitle}>
+            {batch.modules.length} módulo(s) • {batch.createdAt}
+          </Text>
+        </View>
+      );
+    } else {
+      const mod = item as DamagedModule;
+      return (
+        <View style={styles.card}>
+          <Text style={styles.cardTitle}>{mod.code}</Text>
+          <Text style={styles.cardSubtitle}>
+            {mod.usina} - {mod.subarea} • {mod.timestamp}
+          </Text>
+        </View>
+      );
+    }
+  }}
+  ListEmptyComponent={
+    <Text style={styles.emptyText}>Nenhum dado encontrado.</Text>
+  }
+/>
+      )}
     </View>
   );
 }
